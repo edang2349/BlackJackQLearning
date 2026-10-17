@@ -1,0 +1,5 @@
+gymnasium[toy-text]>=1.0
+numpy
+matplotlib
+pillow
+imageio-ffmpeg  # only needed for make_video.py if ffmpeg is not on PATH

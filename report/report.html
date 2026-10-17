@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HW2 Q-learning Blackjack</title>
+<style>
+  @page { size: letter; margin: 0.8in 0.75in; }
+  body { font-family: "Cambria", "Times New Roman", serif; font-size: 10.5pt; line-height: 1.42;
+         color: #111; background: #fff; max-width: 7in; margin: 0 auto; }
+  h1 { font-size: 18pt; margin: 0 0 4pt; }
+  .meta { color: #444; margin-bottom: 14pt; }
+  h2 { font-size: 13pt; margin: 16pt 0 5pt; border-bottom: 1px solid #ccc; padding-bottom: 2pt;
+       break-after: avoid; }
+  h3 { font-size: 11pt; margin: 10pt 0 3pt; break-after: avoid; }
+  p { margin: 0 0 7pt; text-align: justify; }
+  ul { margin: 0 0 7pt; padding-left: 18pt; }
+  li { margin-bottom: 2pt; }
+  figure { margin: 8pt 0 10pt; break-inside: avoid; text-align: center; }
+  figure img { width: 100%; }
+  figure.narrow img { width: 78%; }
+  figcaption { font-size: 9pt; color: #333; text-align: left; margin-top: 3pt; }
+  table { border-collapse: collapse; margin: 6pt auto 10pt; font-size: 9pt; break-inside: avoid; }
+  th, td { border-bottom: 1px solid #ddd; padding: 2.5pt 7pt; text-align: right; }
+  th { border-bottom: 1.5px solid #555; font-weight: bold; }
+  td:first-child, th:first-child { text-align: left; }
+  .eq { text-align: center; margin: 6pt 0 8pt; font-size: 11pt; }
+  code { font-family: Consolas, monospace; font-size: 9pt; }
+  .caption-t { font-size: 9pt; color: #333; text-align: center; margin-top: -6pt; margin-bottom: 10pt; }
+  a { color: #1a55a8; }
+</style>
+</head>
+<body>
+
+<h1>Assignment 2: Q-learning on Blackjack</h1>
+<div class="meta">Evan Dang · CPSC 4420 · October 2026<br>
+Code, plots, and video: <a href="https://github.com/edang2349/BlackJackQLearning">https://github.com/edang2349/BlackJackQLearning</a></div>
+
+<h2>A. Environment</h2>
+<p>I used Gymnasium's <code>Blackjack-v1</code> with its default settings, <code>natural=False</code> and
+<code>sab=False</code>. This is the blackjack problem from Sutton &amp; Barto, Example 5.1. The player tries to
+beat the dealer by finishing closer to 21 without going over.</p>
+<ul>
+  <li>Observation: a tuple of the player's sum, the dealer's face-up card, and whether the player has a usable
+  ace. The declared space is <code>Tuple(Discrete(32), Discrete(11), Discrete(2))</code>. The player sum is 4–21
+  when a decision is made and can reach 31 after a bust. The dealer card is 1–10, where 1 is an ace. Usable ace is
+  1 if the player holds an ace that can count as 11 without busting. Only about 280 of these states ever need a
+  decision.</li>
+  <li>Actions: <code>Discrete(2)</code>, where 0 means stick and 1 means hit. Doubling and splitting are not
+  allowed.</li>
+  <li>Transitions: cards are drawn with replacement from an infinite deck. Each rank from ace to 9 has
+  probability 1/13, and a ten-valued card has probability 4/13. A hit adds one card to the player's hand. A stick
+  ends the player's turn, and the dealer then draws until reaching 17 or more.</li>
+  <li>Rewards: +1 for a win, −1 for a loss, 0 for a draw, and 0 for a hit that does not bust. Under these
+  settings a natural blackjack pays +1, not 1.5. All reward comes at the end of a hand.</li>
+  <li>Termination: the episode ends when the player busts after a hit or when the player sticks. It is never
+  truncated. One episode is one hand and usually takes 1–3 decisions.</li>
+</ul>
+<p>The observation is already discrete and small, so no discretization is needed. The Q-table is a dictionary
+keyed by the observation tuple. Blackjack is already stochastic, so for part H I added a separate noise source on
+the agent's actions. Blackjack favors the house: even the best hit/stick policy, known as basic strategy, loses
+about 0.047 per hand under these rules. I use basic strategy (Sutton &amp; Barto, Fig. 5.2) as the target, and I
+report how often the learned policy matches it over the 200 decision states with player sum 12–21.</p>
+
+<h2>B. Q-learning implementation</h2>
+<p>The agent is written from scratch as the <code>QLearningAgent</code> class in <code>qlearning.py</code>. Only
+the environment comes from Gymnasium.</p>
+<ul>
+  <li>Q-value initialization: the Q-table is a <code>defaultdict</code>, so every new state starts at
+  <code>[q_init, q_init]</code>, with <code>q_init = 0</code> by default.</li>
+  <li>ε-greedy action selection: with probability ε the agent takes a uniformly random action, and otherwise it
+  takes argmax<sub>a</sub> Q(s,a), breaking ties at random. Setting <code>explore=False</code> gives the purely
+  greedy policy used for every evaluation.</li>
+  <li>Update with terminal handling: after each step the agent applies</li>
+</ul>
+<div class="eq">Q(s,a) ← Q(s,a) + α [ r + γ · max<sub>a′</sub> Q(s′,a′) − Q(s,a) ]</div>
+<p>When a step ends the hand with a bust or a stick, the next state has value 0, so the target is just r.
+Truncation would bootstrap, but it never happens in Blackjack.</p>
+<ul>
+  <li>Training loop: <code>train(cfg, seed)</code> resets the environment, sets ε from the schedule, plays the
+  hand while updating after every step, and records the episode reward. Every 10,000 episodes it also scores the
+  current greedy policy on a fixed set of 5,000 hands.</li>
+  <li>Hyperparameters: α, γ, ε<sub>start</sub>, ε<sub>end</sub>, the decay length, the number of episodes,
+  <code>q_init</code>, and the noise level p are all fields of one <code>Config</code> dataclass. Each experiment
+  changes a single field, for example <code>BASELINE.with_(alpha=0.5)</code>. The ε schedule decays linearly from
+  ε<sub>start</sub> to ε<sub>end</sub> over the first f × N episodes and then stays at ε<sub>end</sub>.</li>
+  <li>Evaluation: <code>evaluate()</code> plays a fixed policy with no learning and no exploration. Every policy
+  is scored on the same seeded card sequence, a technique called common random numbers, which makes comparisons
+  between policies sharper.</li>
+</ul>
+<h3>Protocol</h3>
+<p>Every configuration is trained with 10 random seeds. Plots show the mean ± 1 standard deviation across seeds.
+A hand's reward has a standard deviation of about 0.95, so I used three separate sets of hands. Curves during
+training use 5,000 hands. Model selection uses 50,000 validation hands. The final numbers in part G use 100,000
+test hands that were never used to make a choice. Each 95% confidence interval on 100,000 hands is ±0.006.</p>
+
+<h2>C. Baseline training</h2>
+<p>The baseline uses α = 0.01 and γ = 1.0, with Q initialized to 0 and 200,000 training episodes. ε decays
+linearly from 1.0 to 0.05 over the first 50% of training, which is 100k episodes, and then stays at 0.05. I chose
+γ = 1 because the task is episodic and all reward arrives at the end, so there is no reason to discount. I chose
+α = 0.01 because the returns are very noisy, and a small α averages over roughly 1/α ≈ 100 recent outcomes for
+each state–action pair.</p>
+<figure><img src="../results/C_baseline_training.png">
+<figcaption>Figure 1. Baseline. Left: the training reward as a 5,000-episode moving average with exploration on,
+and the greedy policy's reward on fixed evaluation hands. The dashed line is basic strategy. Right: the ε
+schedule.</figcaption></figure>
+<h3>Initial results</h3>
+<p>The training reward, shown in blue, climbs from about −0.38 to about −0.07, almost exactly following the ε
+schedule. Early on most actions are random, and a random policy loses about 0.40 per hand. Once ε reaches 0.05 at
+episode 100k, the curve flattens. It stays below the greedy curve because 5% of actions are still random. The
+greedy policy, shown in orange, learns much faster than the training curve suggests. After only 10k episodes it is
+already at about −0.07, because the Q-values quickly learn the obvious rules: stick on 20–21 and hit on 12 and
+below. The rest of training slowly fixes the close-call states, which are mostly sums of 12–16 against different
+dealer cards. After 200k episodes the baseline scores a mean of −0.0524 on the validation hands, with a standard
+deviation of 0.0021 across seeds, against −0.0481 for basic strategy. It matches basic strategy in 94.2% of
+decision states.</p>
+
+<h2>D. Learning-rate experiment</h2>
+<p>I tested α ∈ {0.001, 0.01, 0.1, 0.5, 0.9} with every other setting at the baseline.</p>
+<figure><img src="../results/D_alpha.png">
+<figcaption>Figure 2. Learning rate. Left: training reward. Middle: greedy-policy reward during training. Right:
+final greedy reward on 50k validation hands. Each bar is the mean, the error bar is the standard deviation across
+seeds, and the dots are individual seeds.</figcaption></figure>
+<table>
+<tr><th>α</th><th>greedy @10k</th><th>greedy @50k</th><th>final validation</th><th>sd across seeds</th><th>fluctuation late in training</th><th>matches basic</th></tr>
+<tr><td>0.001</td><td>−0.063</td><td>−0.057</td><td>−0.0651</td><td>0.0060</td><td>0.011</td><td>90.0%</td></tr>
+<tr><td>0.01</td><td>−0.071</td><td>−0.053</td><td>−0.0524</td><td>0.0021</td><td>0.007</td><td>94.2%</td></tr>
+<tr><td>0.1</td><td>−0.079</td><td>−0.067</td><td>−0.0643</td><td>0.0053</td><td>0.012</td><td>87.5%</td></tr>
+<tr><td>0.5</td><td>−0.117</td><td>−0.113</td><td>−0.0922</td><td>0.0136</td><td>0.015</td><td>81.5%</td></tr>
+<tr><td>0.9</td><td>−0.125</td><td>−0.121</td><td>−0.0989</td><td>0.0204</td><td>0.016</td><td>81.2%</td></tr>
+</table>
+<div class="caption-t">Fluctuation late in training is the standard deviation of a run's greedy-reward curve over the second half of training, averaged over seeds.</div>
+<h3>Observations</h3>
+<p>The learning rate is the setting that matters most. With a fixed α, Q(s,a) is an exponentially weighted
+average of roughly the last 1/α targets. Blackjack outcomes are ±1 coin flips, so a large α makes Q(s,a) track the
+last few results rather than the expected value.</p>
+<ul>
+  <li>α = 0.5 and 0.9 are fast but unstable. They change Q the most per update, but the estimates never settle,
+  and the greedy policy flips back and forth in close states after every lucky or unlucky hand. They have the worst
+  final reward at −0.09 to −0.10, the largest spread across seeds with a standard deviation up to 0.020, the
+  largest fluctuation late in training, and only about 81% agreement with basic strategy.</li>
+  <li>α = 0.001 is stable but too slow. It is actually the best at 10k episodes, because averaging over many
+  outcomes gets the sign of Q(stick) − Q(hit) right for the common states early. But each value moves only 0.1% of
+  the way toward its target per visit. The estimates stay biased toward the zero initialization and toward the
+  values of the early, mostly random policy, which reach Q(s, hit) through bootstrapping. Rarely visited states are
+  still unresolved after 200k episodes, so the curve stalls and the final score is only −0.065 with 90%
+  agreement.</li>
+  <li>α = 0.01 gives the best balance. It has the best final reward, the lowest spread across seeds, and the
+  smoothest curve. α = 0.1 falls in between.</li>
+</ul>
+<p>The training-reward curves in the left panel look similar for every α, because random exploration dominates
+that curve for the first half of training. The greedy-policy curve and the final bars separate the settings much
+more clearly.</p>
+
+<h2>E. Discount-factor experiment</h2>
+<p>I tested γ ∈ {0.5, 0.9, 0.99, 1.0} with the baseline α = 0.01 and ε schedule.</p>
+<figure><img src="../results/E_gamma.png">
+<figcaption>Figure 3. Discount factor, with the same panels as Figure 2.</figcaption></figure>
+<figure class="narrow"><img src="../results/E_gamma_policies.png">
+<figcaption>Figure 4. Greedy policy learned with γ = 0.5 and with γ = 1, using the best seed of each.</figcaption></figure>
+<table>
+<tr><th>γ</th><th>greedy @10k</th><th>greedy @50k</th><th>final validation</th><th>sd across seeds</th><th>matches basic</th></tr>
+<tr><td>0.5</td><td>−0.074</td><td>−0.053</td><td>−0.0533</td><td>0.0035</td><td>94.8%</td></tr>
+<tr><td>0.9</td><td>−0.074</td><td>−0.053</td><td>−0.0544</td><td>0.0038</td><td>93.4%</td></tr>
+<tr><td>0.99</td><td>−0.072</td><td>−0.050</td><td>−0.0557</td><td>0.0037</td><td>94.2%</td></tr>
+<tr><td>1.0</td><td>−0.071</td><td>−0.053</td><td>−0.0524</td><td>0.0021</td><td>94.2%</td></tr>
+</table>
+<h3>Observations</h3>
+<p>In this environment γ has almost no measurable effect. All four final scores fall within about 0.003 of each
+other, which is about one seed-to-seed standard deviation. γ = 1 is nominally best and has the smallest spread.
+The reason is the structure of the game. Sticking ends the hand with an immediate reward, so Q(s, stick) does not
+depend on γ at all. Only Q(s, hit) = γ · E[max<sub>a′</sub> Q(s′,a′)] is discounted, and a hand lasts only 1–3
+decisions, so a future reward is discounted at most once or twice. Weighting immediate versus future reward
+therefore only matters in borderline states. Even there the direction depends on the sign of the future value.
+Most blackjack states have negative value, so γ &lt; 1 shrinks the expected future loss toward zero and makes
+hitting look slightly less bad. For good hands with positive value, it makes hitting look slightly worse. Figure 4
+shows this: γ = 0.5 hits on 19 against an ace and on 18 against a 6, but sticks on 16 against an 8. All three are
+deviations from basic strategy in close states. The discounted objective is not the quantity being scored, which
+is the total reward per hand, so γ = 1 is the right choice, but in Blackjack the cost of a lower γ is small.</p>
+
+<h2>F. Additional hyperparameter: exploration schedule</h2>
+<p>I compared four ε schedules with α = 0.01 and γ = 1: a constant ε = 0.1, and a linear decay from 1.0 to 0.05
+over the first 10%, 50%, or 90% of the 200k episodes. The 50% schedule is the baseline.</p>
+<figure><img src="../results/F_epsilon.png">
+<figcaption>Figure 5. Exploration schedule, with the same panels as Figure 2.</figcaption></figure>
+<table>
+<tr><th>schedule</th><th>greedy @10k</th><th>greedy @50k</th><th>final validation</th><th>sd across seeds</th><th>matches basic</th></tr>
+<tr><td>constant ε = 0.1</td><td>−0.088</td><td>−0.067</td><td>−0.0559</td><td>0.0036</td><td>90.8%</td></tr>
+<tr><td>decay over 10%</td><td>−0.068</td><td>−0.062</td><td>−0.0540</td><td>0.0029</td><td>92.5%</td></tr>
+<tr><td>decay over 50%</td><td>−0.071</td><td>−0.053</td><td>−0.0524</td><td>0.0021</td><td>94.2%</td></tr>
+<tr><td>decay over 90%</td><td>−0.068</td><td>−0.055</td><td>−0.0517</td><td>0.0022</td><td>94.8%</td></tr>
+</table>
+<h3>Observations</h3>
+<p>The schedule mainly controls the cost of learning, which shows in the training reward in the left panel. With
+a constant ε = 0.1 the training reward is good from the start, at about −0.11 after a few thousand hands, but the
+agent never drops the 10% random actions, so it stays at about −0.09. The 10% decay reaches the ε = 0.05 level by
+about 20k episodes. The 50% and 90% schedules spend far more hands exploring and do not reach their plateau until
+100k and 180k episodes. The greedy policy improves in the opposite order. More exploration means rare
+state–action pairs, such as hitting a soft 18 against a 9 or sticking on 13 against a 2, are tried often enough to
+estimate them correctly. Agreement with basic strategy rises steadily from 90.8% to 92.5%, 94.2%, and 94.8%, and
+the final reward improves from −0.056 to −0.052. Constant ε = 0.1 is the weakest, because it explores the least at
+the start, so the action that looks worse early on is rarely tried again. The gaps between the three decaying
+schedules are small compared with the seed-to-seed spread, but the trend is consistent: if only the final policy
+matters, explore longer.</p>
+
+<h2>G. Evaluating the best agent</h2>
+<h3>How the best configuration was chosen</h3>
+<p>I ranked all 11 configurations from parts C–F by their mean greedy reward over the 10 seeds on the 50k
+validation hands. Averaging over seeds avoids rewarding a single lucky run. The top configuration was α = 0.01,
+γ = 1, with ε decaying over 90% of 200k episodes, at −0.0517 on validation. It was followed by the baseline at
+−0.0524 and γ = 0.5 at −0.0533. The top three differ by less than the seed-to-seed standard deviation of about
+0.002, so in practice they are tied. I took the best seed of the winning configuration, seed 8, as the final
+agent and evaluated it once on the 100k held-out test hands with exploration turned off. The best seed of the
+baseline and three reference policies were evaluated on the same test hands.</p>
+<figure class="narrow"><img src="../results/G_policies.png">
+<figcaption>Figure 6. Greedy policy of the best agent and the baseline agent, compared with basic strategy. Top
+row: usable ace. Bottom row: no usable ace.</figcaption></figure>
+<table>
+<tr><th>policy</th><th>hands</th><th>mean reward ± 95% CI</th><th>win</th><th>draw</th><th>loss</th><th>bust</th><th>actions / hand</th><th>matches basic</th></tr>
+<tr><td>best Q-learning agent</td><td>100,000</td><td>−0.0541 ± 0.0059</td><td>42.5%</td><td>9.5%</td><td>48.0%</td><td>18.9%</td><td>1.56</td><td>95.5%</td></tr>
+<tr><td>baseline Q-learning agent</td><td>100,000</td><td>−0.0566 ± 0.0059</td><td>42.4%</td><td>9.5%</td><td>48.1%</td><td>20.5%</td><td>1.58</td><td>93.5%</td></tr>
+<tr><td>basic strategy</td><td>100,000</td><td>−0.0468 ± 0.0059</td><td>43.0%</td><td>9.3%</td><td>47.7%</td><td>18.1%</td><td>1.54</td><td>100%</td></tr>
+<tr><td>dealer rule: hit below 17</td><td>100,000</td><td>−0.0804 ± 0.0058</td><td>40.7%</td><td>10.6%</td><td>48.7%</td><td>28.1%</td><td>1.62</td><td>–</td></tr>
+<tr><td>random</td><td>100,000</td><td>−0.3982 ± 0.0055</td><td>27.9%</td><td>4.3%</td><td>67.7%</td><td>31.1%</td><td>1.37</td><td>–</td></tr>
+<tr><td>best agent, first 30 hands only</td><td>30</td><td>−0.133 ± 0.348</td><td>40.0%</td><td>6.7%</td><td>53.3%</td><td>30.0%</td><td>1.57</td><td>–</td></tr>
+</table>
+<h3>Results</h3>
+<p>The best agent averages −0.054 per hand. It wins 42.5% of hands, draws 9.5%, and busts in 18.9%, using 1.56
+actions per hand on average. That is far better than random play at −0.398 and the naive rule of copying the
+dealer at −0.080. It is within 0.007 of basic strategy, the best possible hit/stick policy here, and matches it in
+95.5% of the 200 decision states. Figure 6 shows the nine remaining differences are all in close states: hard 12
+against a 4 or 6, hard 13 against a 2 or 6, hard 16 against a 7, and soft 18–19 against an ace, 3, or 6. In those
+states the two actions' values differ by only a few hundredths, and that is too small to resolve from the samples
+seen in 200k episodes. Compared with the baseline, the best agent is better by 0.0025 per hand, busts less at
+18.9% against 20.5%, and matches basic strategy in 2 points more states, 95.5% against 93.5%. That is the same
+direction as the validation ranking, but it is inside the confidence interval, so the honest conclusion is that
+longer exploration gives at most a small gain. The last row of the table shows why many hands are needed. Thirty
+hands give a 95% interval of ±0.35, which cannot even separate the trained agent from a random policy, so the
+required evaluation of at least 30 episodes is done with 100,000 episodes.</p>
+
+<h2>H. Stochastic environment: action noise</h2>
+<h3>Modification</h3>
+<p>An <code>ActionNoise</code> wrapper, built on <code>gym.ActionWrapper</code>, replaces the agent's chosen
+action with the other action with probability p. With only two actions, replacing the action with a different
+valid one means flipping it. The wrapper has its own seeded random number generator, so this uncertainty is
+independent of the card draws and can be tuned with one parameter. I trained the best configuration from part G
+under p ∈ {0, 0.10, 0.25, 0.40} with 10 seeds each, and evaluated each agent under its own noise level on the 100k
+test hands. I also evaluated the p = 0 agent and basic strategy under each noise level, to test whether a policy
+learned without noise still works.</p>
+<figure><img src="../results/H_noise.png">
+<figcaption>Figure 7. Left: greedy-policy reward during training under each noise level, measured with the noise
+on. Right: test reward under noise p for the agent trained under p, the original p = 0 agent, and basic
+strategy.</figcaption></figure>
+<table>
+<tr><th>p</th><th>trained under p</th><th>p = 0 policy</th><th>basic strategy</th><th>val sd across seeds</th><th>bust, trained / p=0 policy</th><th>actions / hand</th><th>matches p=0 policy</th></tr>
+<tr><td>0</td><td>−0.0541</td><td>−0.0541</td><td>−0.0468</td><td>0.0022</td><td>18.9% / 18.9%</td><td>1.56</td><td>100%</td></tr>
+<tr><td>0.10</td><td>−0.1164</td><td>−0.1241</td><td>−0.1239</td><td>0.0060</td><td>18.6% / 21.3%</td><td>1.49</td><td>92.5%</td></tr>
+<tr><td>0.25</td><td>−0.2270</td><td>−0.2303</td><td>−0.2285</td><td>0.0039</td><td>21.3% / 25.2%</td><td>1.40</td><td>86.5%</td></tr>
+<tr><td>0.40</td><td>−0.3321</td><td>−0.3279</td><td>−0.3336</td><td>0.0057</td><td>27.0% / 28.7%</td><td>1.38</td><td>80.5%</td></tr>
+</table>
+<div class="caption-t">All rewards are on the 100k test hands, with a 95% CI of ±0.006, evaluated under the noise level in the first column.</div>
+<h3>Final reward</h3>
+<p>Noise lowers the reward roughly in proportion to p, from −0.054 to −0.116, −0.227, and −0.332. Most of this
+loss cannot be avoided by any policy. A flipped action on a hard 20 means hitting, which almost always busts. A
+flipped hit on 9 means standing on a hand that cannot win. At p = 0.4 the results approach the random policy at
+−0.40, because the intended action is carried out only 60% of the time, barely more than a coin flip.</p>
+<h3>Learning speed and stability</h3>
+<p>All noise levels reach their plateau in about the same time, 10k–20k episodes as shown in Figure 7, so noise
+does not slow learning much. It does make learning less precise: the standard deviation across seeds rises from
+0.0022 to 0.004–0.006. Rewards become noisier, and every transition now mixes the effects of two actions, so the
+Q-value gaps the agent must resolve shrink.</p>
+<h3>Robustness of the p = 0 policy</h3>
+<p>The policy trained without noise stays effective. Under every noise level it scores within about one
+confidence interval of the agent trained under that noise, and as well as basic strategy. The largest gain from
+training under noise is +0.008 at p = 0.10, and at p = 0.40 the p = 0 policy is actually slightly ahead, which is
+within noise. The noise-trained policies do adapt in a sensible way. Under the same noise they stick earlier than
+the p = 0 policy, taking 1.49 actions per hand against 1.52 at p = 0.10, 1.40 against 1.46 at p = 0.25, and 1.38
+against 1.41 at p = 0.40. They also bust less, 18.6% against 21.3% at p = 0.10 and 21.3% against 25.2% at
+p = 0.25. Each extra decision is another chance for a harmful flip, so ending the hand sooner is safer. They
+disagree with the p = 0 policy in 7.5%, 13.5%, and 19.5% of states. As p grows, the policies also become
+patchier, especially for soft hands, which are seen less often; <code>results/H_noise_policies.png</code> shows
+this. Noise pulls the values of the two actions toward each other, so close states are harder to resolve. Because
+those states are close calls, the disagreements barely change the expected reward. In short, action noise mainly
+hurts performance directly. It changes the best policy only a little, and a policy learned without noise remains a
+strong, robust choice.</p>
+
+<h2>Conclusions</h2>
+<ul>
+  <li>Tabular Q-learning learns a near-optimal Blackjack policy: −0.054 per hand against −0.047 for basic
+  strategy, matching it in 95.5% of decision states.</li>
+  <li>α is the most important hyperparameter. The outcomes are very noisy, so α must be small, around 0.01, for
+  the Q-values to average over many hands. A large α of 0.5–0.9 is fast but unstable, and a very small α of 0.001
+  is too slow to converge in 200k episodes.</li>
+  <li>γ barely matters, because hands last 1–3 decisions and sticking ends the hand at once. γ = 1 matches the
+  real objective and is the natural choice.</li>
+  <li>A longer ε decay gives a slightly better final policy at the cost of lower reward during training.</li>
+  <li>Action noise mainly lowers reward directly. Training under noise teaches the agent to stick earlier, but the
+  p = 0 policy stays about as good.</li>
+  <li>Blackjack's high variance means comparisons need many seeds and tens of thousands of evaluation hands.
+  Several of the differences between configurations are smaller than that noise, and I report them as ties.</li>
+</ul>
+<p>The repository contains all code, the plots, <code>results/tables.md</code> with every number in this report,
+and <code>videos/blackjack_agent.mp4</code> with the best agent playing 12 hands, captioned with its action,
+Q-values, and the outcome of each hand.</p>
+
+</body>
+</html>
